@@ -6,14 +6,33 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 
-html = """
+class ConnectionManager:
+    def __init__(self) -> None:
+        # Список для хранения всех активных WebSocket-сессий
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str) -> None:
+        # Отправляем сообщение абсолютно всем подключенным клиентам
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+
+manager = ConnectionManager()
+
+html = html = """
 <!DOCTYPE html>
 <html>
     <head>
         <title>FastAPI WebSocket</title>
     </head>
     <body>
-        <!-- Добавляем id="test-title", чтобы JavaScript мог найти этот элемент -->
         <h1 id="test-title">WebSocket Тест #</h1>
         <form action="" onsubmit="sendMessage(event)">
             <input type="text" id="messageText" autocomplete="off"/>
@@ -24,12 +43,10 @@ html = """
             var ws = new WebSocket("ws://localhost:8000/ws");
             
             ws.onmessage = function(event) {
-                // Проверяем, не пришел ли нам TEST_ID при первом подключении
                 if (event.data.startsWith("INITIAL_ID:")) {
                     var testId = event.data.split(":")[1];
-                    // Меняем текст заголовка h1
                     document.getElementById('test-title').innerText = "WebSocket Тест #" + testId;
-                    return; // Выходим из функции, чтобы не выводить это системное сообщение в список
+                    return; 
                 }
 
                 var messages = document.getElementById('messages');
@@ -52,28 +69,31 @@ html = """
 
 
 @app.get("/")
-async def get():
+async def get() -> HTMLResponse:
     return HTMLResponse(html)
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-
-    # 1. Принимаем подключение клиента
-    await websocket.accept()
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    # 1. Регистрируем новое подключение в менеджере
+    await manager.connect(websocket)
     TEST_ID = randint(1, 100)
 
-    # Сразу после подключения отправляем клиенту его ID со специальным префиксом
+    # Отправляем ID только автору подключения (не через broadcast)
     await websocket.send_text(f"INITIAL_ID:{TEST_ID}")
+
+    # Уведомляем всех, что вошел новый пользователь
+    await manager.broadcast(f"Пользователь {TEST_ID} вошел в чат!")
 
     try:
         while True:
-            # 2. Ожидаем текстовое сообщение от клиента
             data = await websocket.receive_text()
-
-            # 3. Отправляем ответ обратно клиенту (эхо-сервер)
-            await websocket.send_text(f"#{TEST_ID} отправил сообщение: {data}")
+            # 2. Рассылаем сообщение ВСЕМ пользователям
+            await manager.broadcast(f"{TEST_ID}: {data}")
 
     except WebSocketDisconnect:
-        # 4. Обрабатываем отключение клиента
-        print(f"{TEST_ID} вышел из чата")
+        # 3. Удаляем клиента из списка при отключении
+        manager.disconnect(websocket)
+
+        # Уведомляем оставшихся участников
+        await manager.broadcast(f"{TEST_ID}: вышел из чата!")
